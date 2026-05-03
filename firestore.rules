@@ -1,0 +1,83 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    match /_connection_test/{docId} {
+      allow read: if true;
+    }
+
+    // --- Helpers ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    // We allow access if the user's UID matches the path.
+    // We also check email_verified for write operations as per security guidelines.
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+    
+    function isVerifiedOwner(userId) {
+      return isOwner(userId) && (request.auth.token.email_verified == true);
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // --- Validation Helpers ---
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['email', 'createdAt'])
+        && data.email is string
+        && data.createdAt is string
+        && data.email.size() < 256;
+    }
+
+    function isValidToken(data) {
+      // The client saves { accessToken, updatedAt } OR { accessToken, platform, ... }
+      // We'll enforce at least accessToken
+      return data.accessToken is string
+        && data.accessToken.size() > 0
+        && data.accessToken.size() < 2048
+        && (data.updatedAt == null || data.updatedAt is string);
+    }
+
+    // --- Collection Rules ---
+
+    match /users/{userId} {
+      // Identity ID Check
+      allow get: if isOwner(userId);
+      allow list: if false; // Users shouldn't list each other
+      
+      // Profiles are created on first sign-in or settings update
+      allow create: if isVerifiedOwner(userId); // && isValidUser(incoming());
+      allow update: if isVerifiedOwner(userId); // && isValidUser(incoming());
+
+      match /tokens/{tokenId} {
+        // Individual token access
+        allow get: if isOwner(userId);
+        
+        // Listeners on specific tokens are allowed
+        allow list: if isOwner(userId); // In case they query the collection
+
+        // Tokens are sensitive, require verification for write
+        allow create: if isVerifiedOwner(userId) && isValidId(tokenId); // && isValidToken(incoming());
+        allow update: if isVerifiedOwner(userId) && isValidId(tokenId); // && isValidToken(incoming());
+        allow delete: if isVerifiedOwner(userId);
+      }
+    }
+  }
+}
